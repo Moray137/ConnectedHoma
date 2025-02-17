@@ -264,6 +264,12 @@ struct homa_sock {
 	 * Storage is dynamically allocated.
 	 */
 	struct homa_pool *buffer_pool;
+
+	/**
+	 * @destination: used for connect(), stores info from connect().
+	 * It does not interfere the routing process of Homa.
+	 */
+	union sockaddr_in_union destination;
 };
 
 /**

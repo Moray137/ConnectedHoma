@@ -48,6 +48,7 @@ struct homa_rpc *homa_rpc_new_client(struct homa_sock *hsk,
 		goto error;
 	}
 	crpc->dport = ntohs(dest->in6.sin6_port);
+	printk("crpc dport is %u.", crpc->dport);
 	crpc->completion_cookie = 0;
 	crpc->error = 0;
 	crpc->msgin.length = -1;

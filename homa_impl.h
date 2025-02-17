@@ -1177,6 +1177,7 @@ void     homa_rpc_acked(struct homa_sock *hsk,
 void     homa_rpc_free(struct homa_rpc *rpc);
 void     homa_rpc_handoff(struct homa_rpc *rpc);
 int      homa_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
+int      homa_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 int      homa_setsockopt(struct sock *sk, int level, int optname,
 			 sockptr_t optval, unsigned int optlen);
 int      homa_shutdown(struct socket *sock, int how);

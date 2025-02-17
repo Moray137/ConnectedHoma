@@ -193,6 +193,7 @@ int     homa_abort(int sockfd, uint64_t id, int error);
 int     homa_send(int sockfd, const void *message_buf,
 		  size_t length, const struct sockaddr *dest_addr,
 		  uint32_t addrlen,  uint64_t *id, uint64_t completion_cookie);
+int     tcp_style_homa_send(int sockfd, const void *message_buf, size_t length, int flags);
 int     homa_sendv(int sockfd, const struct iovec *iov,
 		   int iovcnt, const struct sockaddr *dest_addr,
 		   uint32_t addrlen,  uint64_t *id, uint64_t completion_cookie);

@@ -212,8 +212,9 @@ int homa_abort(int sockfd, uint64_t id, int error)
 * uint64_t *id and int completion_cookie is deleted for now
 * const struct sockaddr *dest_addr and size_t addrlen are also deleted,
 * but they will be handled by sendmsg() in kernel
+* flags are not used in Homa
 */
-int tcp_style_homa_send(int sockfd, const void *message_buf, size_t length)
+int tcp_style_homa_send(int sockfd, const void *message_buf, size_t length, int flags)
 {
 	struct homa_sendmsg_args args;
 	struct msghdr hdr;
@@ -226,6 +227,8 @@ int tcp_style_homa_send(int sockfd, const void *message_buf, size_t length)
 	vec.iov_base = (void *)message_buf;
 	vec.iov_len = length;
 
+	hdr.msg_name = NULL;
+	hdr.msg_namelen = 0;
 	hdr.msg_iov = &vec;
 	hdr.msg_iovlen = 1;
 	hdr.msg_control = &args;
