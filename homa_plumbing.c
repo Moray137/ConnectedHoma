@@ -53,11 +53,11 @@ static const struct proto_ops homa_proto_ops = {
 	.bind		   = homa_bind,
 	.connect	   = inet_dgram_connect,
 	.socketpair	   = sock_no_socketpair,
-	.accept		   = sock_no_accept,
+	.accept		   = inet_accept,
 	.getname	   = inet_getname,
 	.poll		   = homa_poll,
 	.ioctl		   = inet_ioctl,
-	.listen		   = sock_no_listen,
+	.listen		   = homa_listen,
 	.shutdown	   = homa_shutdown,
 	.setsockopt	   = sock_common_setsockopt,
 	.getsockopt	   = sock_common_getsockopt,
@@ -74,11 +74,11 @@ static const struct proto_ops homav6_proto_ops = {
 	.bind		   = homa_bind,
 	.connect	   = inet_dgram_connect,
 	.socketpair	   = sock_no_socketpair,
-	.accept		   = sock_no_accept,
+	.accept		   = inet_accept,
 	.getname	   = inet6_getname,
 	.poll		   = homa_poll,
 	.ioctl		   = inet6_ioctl,
-	.listen		   = sock_no_listen,
+	.listen		   = homa_listen,
 	.shutdown	   = homa_shutdown,
 	.setsockopt	   = sock_common_setsockopt,
 	.getsockopt	   = sock_common_getsockopt,
@@ -105,6 +105,7 @@ static struct proto homa_prot = {
 	.destroy	   = NULL,
 	.setsockopt	   = homa_setsockopt,
 	.getsockopt	   = homa_getsockopt,
+	.accept        = homa_accept,
 	.sendmsg	   = homa_sendmsg,
 	.recvmsg	   = homa_recvmsg,
 	.backlog_rcv       = homa_backlog_rcv,
@@ -129,6 +130,7 @@ static struct proto homav6_prot = {
 	.destroy	   = NULL,
 	.setsockopt	   = homa_setsockopt,
 	.getsockopt	   = homa_getsockopt,
+	.accept        = homa_accept,
 	.sendmsg	   = homa_sendmsg,
 	.recvmsg	   = homa_recvmsg,
 	.backlog_rcv       = homa_backlog_rcv,
@@ -915,14 +917,15 @@ int homa_getsockopt(struct sock *sk, int level, int optname,
 }
 
 /**
- * homa_sendmsg() - Send a request or response message on a Homa socket.
+ * homa_sendmsg_original() - Send a request or response message on a Homa socket.
+ * This is the unmodified homa_sendmsg() method, which was in HomaModule.
  * @sk:     Socket on which the system call was invoked.
  * @msg:    Structure describing the message to send; the msg_control
  *          field points to additional information.
  * @length: Number of bytes of the message.
  * Return: 0 on success, otherwise a negative errno.
  */
-int homa_sendmsg(struct sock *sk, struct msghdr *msg, size_t length)
+static int homa_sendmsg_original(struct sock *sk, struct msghdr *msg, size_t length)
 {
 	struct homa_sock *hsk = homa_sk(sk);
 	struct homa_sendmsg_args args;
@@ -1006,13 +1009,16 @@ int homa_sendmsg(struct sock *sk, struct msghdr *msg, size_t length)
 			goto error;
 		}
 		canonical_dest = canonical_ipv6_addr(addr);
-
+		printk("homa_sendmsg_original: finding server rpc. /n");
 		rpc = homa_find_server_rpc(hsk, &canonical_dest, args.id);
+		printk("homa_sendmsg_original: found server rpc. /n");
 		if (!rpc) {
 			/* Return without an error if the RPC doesn't exist;
 			 * this could be totally valid (e.g. client is
 			 * no longer interested in it).
 			 */
+			printk("homa_sendmsg error: RPC id %llu, peer 0x%x, doesn't exist",
+				   args.id, tt_addr(canonical_dest));
 			tt_record2("homa_sendmsg error: RPC id %d, peer 0x%x, doesn't exist",
 				   args.id, tt_addr(canonical_dest));
 			return 0;
@@ -1053,6 +1059,203 @@ error:
 }
 
 /**
+ * homa_tcp_sendmsg() - Send a request or response message on a Homa socket.
+ * This is for tcp-style homa programming, without specifying daddr in user space.
+ * @sk:     Socket on which the system call was invoked.
+ * @msg:    Structure describing the message to send; the msg_control
+ *          field points to additional information.
+ * @length: Number of bytes of the message.
+ * Return: 0 on success, otherwise a negative errno.
+ */
+static int homa_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t length)
+{
+	struct homa_sock *hsk = homa_sk(sk);
+	struct homa_sendmsg_args args;
+	union sockaddr_in_union *addr;
+	struct sockaddr_in *ip4 = kzalloc(sizeof(struct sockaddr_in), GFP_KERNEL);
+	struct sockaddr_in6 *ip6 = kzalloc(sizeof(struct sockaddr_in6), GFP_KERNEL);
+	__u64 start = sched_clock();
+	struct homa_rpc *rpc = NULL;
+	int result = 0;
+	if (!ip4 || !ip6) {
+		pr_err("Failed to allocate memory for addr\n");
+		result = -ENOMEM;
+		goto error;
+	}
+	__u64 finish;
+	// If the socket is not connected, report err
+	if (sk->sk_state != TCP_ESTABLISHED) {
+		pr_err("homa_sendmsg: unconnected Homa is not supported with connected socks.\n");
+		result = -ENOTSUPP;
+		goto error;
+	}
+
+	per_cpu(homa_offload_core, raw_smp_processor_id()).last_app_active =
+			start;
+	// Retrieve addr from connected socket
+	// ipv4
+	if (sk->sk_family == AF_INET) {
+		ip4->sin_family        = AF_INET;
+		ip4->sin_addr.s_addr = hsk->inet.inet_daddr;
+		ip4->sin_port        = hsk->inet.inet_dport;
+		addr = (union sockaddr_in_union *) (struct sockaddr *) ip4;
+		printk("daddr is: %u. \n", ntohl(addr->in4.sin_addr.s_addr));
+		printk("dport is: %hu. \n", ntohs(addr->in4.sin_port));
+		pr_info("ipv4 daddr set.\n");
+	}
+	// ipv6
+	else if (sk->sk_family == AF_INET6) {
+		ip6->sin6_family  = AF_INET6;
+		ip6->sin6_addr = sk->sk_v6_daddr;
+		ip6->sin6_port = hsk->inet.inet_dport;
+		addr = (union sockaddr_in_union *) (struct sockaddr *) ip6;
+		pr_info("ipv6 daddr set.\n");
+	}
+	if (!addr) {
+		result = -EINVAL;
+		pr_err("homa_sendmsg: invalid address structure.\n");
+		goto error;
+	}
+
+	if (unlikely(!msg->msg_control_is_user)) {
+		tt_record("homa_sendmsg error: !msg->msg_control_is_user");
+		pr_err("homa_sendmsg error: msg->msg_control_is_user is NULL\n");
+		result = -EINVAL;
+		goto error;
+	}
+	if (unlikely(copy_from_user(&args, (void __user *)msg->msg_control,
+				    sizeof(args)))) {
+		result = -EFAULT;
+		pr_err("homa_sendmsg error: copy_from_user failed\n");
+		goto error;
+	}
+	printk("args.id is %llu", args.id);
+	if (addr->sa.sa_family != sk->sk_family) {
+		result = -EAFNOSUPPORT;
+		pr_err("homa_sendmsg error: addr->sa.sa_family is not supported\n");
+		goto error;
+	}
+	/**
+	 * As daddr is fully handled in kernel, msg_name and msg_namelen
+	 * do not need to be checked.
+	if (msg->msg_namelen < sizeof(struct sockaddr_in) ||
+	    (msg->msg_namelen < sizeof(struct sockaddr_in6) &&
+	     addr->in6.sin6_family == AF_INET6)) {
+		tt_record("homa_sendmsg error: msg_namelen too short");
+		result = -EINVAL;
+		goto error;
+	}
+	*
+	*/
+	if (!args.id) {
+		/* This is a request message. */
+		rpc = homa_rpc_new_client(hsk, addr);
+		if (IS_ERR(rpc)) {
+			pr_err("homa_sendmsg error: homa_rpc_new_client failed\n");
+			result = PTR_ERR(rpc);
+			rpc = NULL;
+			goto error;
+		}
+		INC_METRIC(send_calls, 1);
+		tt_record4("homa_sendmsg request, target 0x%x:%d, id %u, length %d",
+			   (addr->in6.sin6_family == AF_INET)
+			   ? ntohl(addr->in4.sin_addr.s_addr)
+			   : tt_addr(addr->in6.sin6_addr),
+			   ntohs(addr->in6.sin6_port), rpc->id, length);
+		rpc->completion_cookie = args.completion_cookie;
+		result = homa_message_out_fill(rpc, &msg->msg_iter, 1);
+		if (result) {
+			pr_err("homa_sendmsg: homa_msg_out_fill had issues!\n");
+			goto error;
+		}
+		args.id = rpc->id;
+		homa_rpc_unlock(rpc); /* Locked by homa_rpc_new_client. */
+		rpc = NULL;
+
+		if (unlikely(copy_to_user((void __user *)msg->msg_control,
+					  &args, sizeof(args)))) {
+			rpc = homa_find_client_rpc(hsk, args.id);
+			pr_err("homa_sendmsg error: homa_find_client_rpc failed\n");
+			result = -EFAULT;
+			goto error;
+		}
+		finish = sched_clock();
+		INC_METRIC(send_ns, finish - start);
+	} else {
+		/* This is a response message. */
+		struct in6_addr canonical_dest;
+
+		INC_METRIC(reply_calls, 1);
+		tt_record4("homa_sendmsg response, id %llu, port %d, pid %d, length %d",
+			   args.id, hsk->port, current->pid, length);
+		if (args.completion_cookie != 0) {
+			tt_record("homa_sendmsg error: nonzero cookie");
+			pr_err("homa_sendmsg error: nonzero cookie\n");
+			result = -EINVAL;
+			goto error;
+		}
+		canonical_dest = canonical_ipv6_addr(addr);
+
+		rpc = homa_find_server_rpc(hsk, &canonical_dest, args.id);
+		if (!rpc) {
+			/* Return without an error if the RPC doesn't exist;
+			 * this could be totally valid (e.g. client is
+			 * no longer interested in it).
+			 */
+			tt_record2("homa_sendmsg error: RPC id %d, peer 0x%x, doesn't exist",
+				   args.id, tt_addr(canonical_dest));
+			return 0;
+		}
+		if (rpc->error) {
+			result = rpc->error;
+			pr_err("homa_sendmsg error: homa_find_client_rpc failed\n");
+			goto error;
+		}
+		if (rpc->state != RPC_IN_SERVICE) {
+			tt_record2("homa_sendmsg error: RPC id %d in bad state %d",
+				   rpc->id, rpc->state);
+			/* Locked by homa_find_server_rpc. */
+			homa_rpc_unlock(rpc);
+			rpc = NULL;
+			result = -EINVAL;
+			pr_err("homa_sendmsg error: homa_find_client_rpc failed, RPC not in service\n");
+			goto error;
+		}
+		rpc->state = RPC_OUTGOING;
+
+		result = homa_message_out_fill(rpc, &msg->msg_iter, 1);
+		if (result && rpc->state != RPC_DEAD) {
+			pr_err("homa_sendmsg error: homa_message_out_fill failed; resonse msg.\n");
+			goto error;
+		}
+		homa_rpc_unlock(rpc); /* Locked by homa_find_server_rpc. */
+		finish = sched_clock();
+		INC_METRIC(reply_ns, finish - start);
+	}
+	kfree(ip4);
+	kfree(ip6);
+	tt_record1("homa_sendmsg finished, id %d", args.id);
+	pr_info("sendmsg succeeded");
+	return 0;
+
+error:
+	pr_err("err occurred when sendmsg.");
+	if (rpc) {
+		homa_rpc_free(rpc);
+		homa_rpc_unlock(rpc); /* Locked by homa_find_server_rpc. */
+	}
+	tt_record2("homa_sendmsg returning error %d for id %d",
+		   result, args.id);
+	return result;
+}
+
+int homa_sendmsg(struct sock *sk, struct msghdr *msg, size_t length) {
+	if (sk->sk_state == TCP_ESTABLISHED) {
+		return homa_tcp_sendmsg(sk, msg, length);
+	}
+	return homa_sendmsg_original(sk, msg, length);
+}
+/**
  * homa_recvmsg() - Receive a message from a Homa socket.
  * @sk:          Socket on which the system call was invoked.
  * @msg:         Controlling information for the receive.
@@ -1078,13 +1281,16 @@ int homa_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		/* This test isn't strictly necessary, but it provides a
 		 * hook for testing kernel call times.
 		 */
+		pr_err("homa_recvmsg: !msg->msg_control \n");
 		return -EINVAL;
 	}
 	if (msg->msg_controllen != sizeof(control))
 		return -EINVAL;
 	if (unlikely(copy_from_user(&control, (void __user *)msg->msg_control,
-				    sizeof(control))))
+				    sizeof(control)))) {
+		pr_err("homa_recvmsg: copy_from_user failed\n");
 		return -EFAULT;
+	}
 	control.completion_cookie = 0;
 	tt_record3("homa_recvmsg starting, port %d, pid %d, flags %d",
 		   hsk->port, current->pid, control.flags);
@@ -1092,13 +1298,16 @@ int homa_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 	if (control.num_bpages > HOMA_MAX_BPAGES ||
 	    (control.flags & ~HOMA_RECVMSG_VALID_FLAGS)) {
 		result = -EINVAL;
+		pr_err("err with num_bpages or flags in control\n");
 		goto done;
 	}
 	result = homa_pool_release_buffers(hsk->buffer_pool, control.num_bpages,
 					   control.bpage_offsets);
 	control.num_bpages = 0;
-	if (result != 0)
+	if (result != 0) {
+		pr_err("err with pool_release_buffers\n");
 		goto done;
+	}
 
 	rpc = homa_wait_for_message(hsk, (flags & MSG_DONTWAIT)
 			? (control.flags | HOMA_RECVMSG_NONBLOCKING)
@@ -1109,6 +1318,7 @@ int homa_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		 * the RPC itself we won't get here.
 		 */
 		result = PTR_ERR(rpc);
+		pr_err("homa_recvmsg: rpc returning error %d\n", result);
 		goto done;
 	}
 	result = rpc->error ? rpc->error : rpc->msgin.length;
@@ -1189,6 +1399,369 @@ done:
 		   control.bpage_offsets[0] >> HOMA_BPAGE_SHIFT);
 	INC_METRIC(recv_ns, finish - start);
 	return result;
+}
+
+/**
+ * Used for porting TCP to Homa.
+ * homa_listen() - pseudo listen() method to make Homa compatible with TCP syntactically.
+ * @param sock:    Socket for the operation
+ * @param backlog: Backlog of pending connections.
+ * @return         0 if successful
+ */
+int homa_listen(struct socket *sock, int backlog) {
+	struct sock *sk = sock->sk;
+	struct homa_sock *hsk = homa_sk(sk);
+	int err         = -EINVAL;
+	// As Homa is connectionless and connect() does not send SYN or ACK,
+	// this parameter is (safely) always 0.
+	if (unlikely(backlog != 0)) {
+		pr_err("homa_listen: backlog is irrelevant and should always be 0\n");
+		goto out;
+	}
+	// If the socket is shut down
+	if (hsk->shutdown) {
+		pr_err("homa_listen: homa_sk is shut down\n");
+		err = -ESHUTDOWN;
+		goto out;
+	}
+	// If already listening
+	if (sk->sk_state == TCP_LISTEN) {
+		pr_err("homa_listen: sock is already listening\n");
+		goto out;
+	}
+	// Switch to listening state
+	lock_sock(sk);
+	sk->sk_state = TCP_LISTEN;
+	err = 0;
+	printk("homa_listen succeeded.\n");
+	
+out:
+	release_sock(sk);
+	printk("finished listening.\n");
+	return err;
+}
+
+/**
+ * homa_copy_sock(), a helper function for creating an accept sock for a listening sock.
+ * @param newsk newsk to be created
+ * @param sk    LISTENING sock
+ */
+void homa_copy_sock(struct sock *newsk, struct sock *sk) {
+	struct inet_sock *inet = inet_sk(sk);
+	struct inet_sock *newinet;
+	newsk->sk_type = sk->sk_type;
+	newsk->sk_bound_dev_if = sk->sk_bound_dev_if;
+	newsk->sk_flags = sk->sk_flags;
+	newsk->sk_tsflags = sk->sk_tsflags;
+	newsk->sk_no_check_tx = sk->sk_no_check_tx;
+	newsk->sk_no_check_rx = sk->sk_no_check_rx;
+	newsk->sk_reuse = sk->sk_reuse;
+	newsk->sk_shutdown = sk->sk_shutdown;
+	newsk->sk_destruct = sk->sk_destruct;
+	newsk->sk_family = sk->sk_family;
+	newsk->sk_protocol = IPPROTO_HOMA;
+	newsk->sk_backlog_rcv = sk->sk_prot->backlog_rcv;
+	newsk->sk_sndbuf = sk->sk_sndbuf;
+	newsk->sk_rcvbuf = sk->sk_rcvbuf;
+	newsk->sk_lingertime = sk->sk_lingertime;
+	newsk->sk_rcvtimeo = sk->sk_rcvtimeo;
+	newsk->sk_sndtimeo = sk->sk_sndtimeo;
+	newsk->sk_rxhash = sk->sk_rxhash;
+	newinet = inet_sk(newsk);
+	/* Initialize sk's sport, dport, rcv_saddr and daddr for
+	 * getsockname() and getpeername()
+	 */
+	newinet->inet_sport = inet->inet_sport;
+	newinet->inet_saddr = inet->inet_saddr;
+	newinet->inet_rcv_saddr = inet->inet_rcv_saddr;
+	atomic_set(&newinet->inet_id, get_random_u16());
+	inet_set_bit(MC_LOOP, newsk);
+	newinet->mc_ttl = 1;
+	newinet->mc_index = 0;
+	newinet->mc_list = NULL;
+}
+
+/**
+ * Another helper function for copying ip options for a sock, reused from SCTP
+ * @param newsk
+ * @param sk
+ */
+static void homa_copy_ip_options(struct sock *newsk, struct sock *sk)
+{
+	if (sk->sk_family == AF_INET) {
+		struct inet_sock *newinet, *inet = inet_sk(sk);
+		struct ip_options_rcu *inet_opt, *newopt = NULL;
+		newinet = inet_sk(newsk);
+		rcu_read_lock();
+		inet_opt = rcu_dereference(inet->inet_opt);
+		if (inet_opt) {
+			newopt = sock_kmalloc(newsk, sizeof(*inet_opt) +
+						  inet_opt->opt.optlen, GFP_ATOMIC);
+			if (newopt)
+				memcpy(newopt, inet_opt, sizeof(*inet_opt) +
+					   inet_opt->opt.optlen);
+			else
+				pr_err("%s: Failed to copy ip options\n", __func__);
+		}
+		RCU_INIT_POINTER(newinet->inet_opt, newopt);
+		rcu_read_unlock();
+	}
+	if (sk->sk_family == AF_INET6) {
+		struct ipv6_pinfo *newnp, *np = inet6_sk(sk);
+		struct ipv6_txoptions *opt;
+		newnp = inet6_sk(newsk);
+		rcu_read_lock();
+		opt = rcu_dereference(np->opt);
+		if (opt) {
+			opt = ipv6_dup_options(newsk, opt);
+			if (!opt)
+				pr_err("%s: Failed to copy ip options\n", __func__);
+		}
+		RCU_INIT_POINTER(newnp->opt, opt);
+		rcu_read_unlock();
+	}
+}
+
+/**
+ * homa_recvmsg_kernel: Reused from homa_recvmsg to give functionality to homa_accept()
+ * ignored copy_from_user as the call of the method was from kernel, which yields its name
+ * @sk:          Socket on which the system call was invoked.
+ * @msg:         Controlling information for the receive.
+ * @len:         Total bytes of space available in msg->msg_iov; not used.
+ * @flags:       Flags from system call; only MSG_DONTWAIT is used.
+ * @addr_len:    Store the length of the sender address here
+ * Return:       The length of the message on success, otherwise a negative
+ *               errno.
+ */
+static int homa_recvmsg_kernel(struct sock *sk, struct msghdr *msg, size_t len, int flags,
+                        int *addr_len)
+{
+	struct homa_sock *hsk = homa_sk(sk);
+	struct homa_recvmsg_args *control;
+	__u64 start = sched_clock();
+	struct homa_rpc *rpc;
+	__u64 finish;
+	int result;
+
+	INC_METRIC(recv_calls, 1);
+	per_cpu(homa_offload_core, raw_smp_processor_id()).last_app_active = start;
+	if (unlikely(!msg->msg_control)) {
+		/* This test isn't strictly necessary, but it provides a
+		 * hook for testing kernel call times.
+		 */
+		pr_err("homa_recvmsg_kernel: !msg->msg_control \n");
+		return -EINVAL;
+	}
+	if (msg->msg_controllen != sizeof(*control)) {
+		pr_err("homa_recvmsg_kernel: msg->controllen != sizeof(control)\n");
+		return -EINVAL;
+	}
+	// In kernel call, so just assign the control pointer with passed-in msg_control
+	control = msg->msg_control;
+	control->completion_cookie = 0;
+	tt_record3("homa_recvmsg_kernel starting, port %d, pid %d, flags %d",
+		   hsk->port, current->pid, control->flags);
+	printk("homa_recvmsg_kernel starting, port %d, pid %d, flags %d",
+		   hsk->port, current->pid, control->flags);
+
+	if (control->num_bpages > HOMA_MAX_BPAGES ||
+	    (control->flags & ~HOMA_RECVMSG_VALID_FLAGS)) {
+		result = -EINVAL;
+		pr_err("homa_recvmsg_kernel: err with num_bpages or flags in control\n");
+		goto done;
+	}
+	result = homa_pool_release_buffers(hsk->buffer_pool, control->num_bpages,
+					   control->bpage_offsets);
+	printk("homa_pool_release_buffers: buffers released in kernel.");
+	control->num_bpages = 0;
+	if (result != 0) {
+		pr_err("homa_recvmsg_kernel: err with pool_release_buffers\n");
+		goto done;
+	}
+	pr_info("homa_recvmsg_kernel: waiting for incoming msg.\n");
+	rpc = homa_wait_for_message(hsk, (flags & MSG_DONTWAIT)
+			? (control->flags | HOMA_RECVMSG_NONBLOCKING)
+			: control->flags, control->id);
+	pr_info("homa_recvmsg_kernel:msg received\n");
+	if (IS_ERR(rpc)) {
+		/* If we get here, it means there was an error that prevented
+		 * us from finding an RPC to return. If there's an error in
+		 * the RPC itself we won't get here.
+		 */
+		result = PTR_ERR(rpc);
+		pr_err("homa_recvmsg_kernel: rpc returning error %d\n", result);
+		goto done;
+	}
+	result = rpc->error ? rpc->error : rpc->msgin.length;
+
+	/* Generate time traces on both ends for long elapsed times (used
+	 * for performance debugging).
+	 */
+	if (rpc->hsk->homa->freeze_type == SLOW_RPC) {
+		u64 elapsed = (sched_clock() - rpc->start_ns) >> 10;
+
+		if (elapsed <= hsk->homa->temp[1] &&
+		    elapsed >= hsk->homa->temp[0] &&
+		    homa_is_client(rpc->id) &&
+		    rpc->msgin.length >= hsk->homa->temp[2] &&
+		    rpc->msgin.length < hsk->homa->temp[3]) {
+			tt_record4("Long RTT: kcycles %d, id %d, peer 0x%x, length %d",
+				   elapsed, rpc->id, tt_addr(rpc->peer->addr),
+				   rpc->msgin.length);
+			homa_freeze(rpc, SLOW_RPC,
+				    "Freezing because of long elapsed time for RPC id %d, peer 0x%x");
+		}
+	}
+	pr_info("homa_recvmsg_kernel: collecting result info\n");
+	/* Collect result information. */
+	control->id = rpc->id;
+	control->completion_cookie = rpc->completion_cookie;
+	if (likely(rpc->msgin.length >= 0)) {
+		control->num_bpages = rpc->msgin.num_bpages;
+		memcpy(control->bpage_offsets, rpc->msgin.bpage_offsets,
+		       sizeof(rpc->msgin.bpage_offsets));
+	}
+	if (sk->sk_family == AF_INET6) {
+		struct sockaddr_in6 *in6 = msg->msg_name;
+
+		in6->sin6_family = AF_INET6;
+		in6->sin6_port = htons(rpc->dport);
+		in6->sin6_addr = rpc->peer->addr;
+		*addr_len = sizeof(*in6);
+	} else {
+		struct sockaddr_in *in4 = msg->msg_name;
+
+		in4->sin_family = AF_INET;
+		in4->sin_port = htons(rpc->dport);
+		in4->sin_addr.s_addr = ipv6_to_ipv4(rpc->peer->addr);
+		*addr_len = sizeof(*in4);
+	}
+
+	/* This indicates that the application now owns the buffers, so
+	 * we won't free them in homa_rpc_free.
+	 */
+	rpc->msgin.num_bpages = 0;
+
+	/* Must release the RPC lock (and potentially free the RPC) before
+	 * copying the results back to user space.
+	 */
+	if (homa_is_client(rpc->id)) {
+		homa_peer_add_ack(rpc);
+		homa_rpc_free(rpc);
+	} else {
+		if (result < 0)
+			homa_rpc_free(rpc);
+		else
+			rpc->state = RPC_IN_SERVICE;
+	}
+	homa_rpc_unlock(rpc); /* Locked by homa_wait_for_message. */
+
+done:
+	finish = sched_clock();
+	tt_record3("homa_recvmsg returning id %d, length %d, bpage0 %d",
+		   control->id, result,
+		   control->bpage_offsets[0] >> HOMA_BPAGE_SHIFT);
+	INC_METRIC(recv_ns, finish - start);
+	return result;
+}
+
+/**
+ * homa_accept() used for TCP-style coding
+ * @param sk    LISTENING sock to accept
+ * @param flags not used
+ * @param err   error pointer for checking
+ * @param kern  decide whether this method is only used in kernel
+ * @return new struct sock representing the sock connected to client.
+ */
+struct sock *homa_accept(struct sock *sk, struct proto_accept_arg *arg) {
+	struct sock *newsk = NULL;
+	struct sockaddr_in *msg_name_in4 = kmalloc(sizeof(struct sockaddr_in), GFP_KERNEL);
+	struct sockaddr_in6 *msg_name_in6 = kmalloc(sizeof(struct sockaddr_in6), GFP_KERNEL);
+	int error = 0;
+	// For homa_recvmsg()
+	struct msghdr *msg = kmalloc(sizeof(struct user_msghdr), GFP_KERNEL);
+	if (!msg) {
+		pr_err("Failed to allocate memory for msghdr\n");
+		error = -ENOMEM;
+		goto out;
+	}
+	struct homa_recvmsg_args *recvmsg_args = kmalloc(sizeof(struct homa_recvmsg_args), GFP_KERNEL);
+	if (!recvmsg_args) {
+		pr_err("Failed to allocate memory for recvmsg_args\n");
+		error = -ENOMEM;
+		goto out;
+	}
+	int *addr_len = kmalloc(sizeof(int), GFP_KERNEL);
+	if (!addr_len) {
+		pr_err("Failed to allocate memory for addr_len\n");
+		error = -ENOMEM;
+		goto out;
+	}
+	printk("accept declared structs and initialised");
+	// Only interested in REQUEST messages
+	recvmsg_args->id    = 0;
+	recvmsg_args->flags = HOMA_RECVMSG_REQUEST;
+	// Assigns 0 as this is in kernel operation.
+	recvmsg_args->num_bpages = 0;
+	if (sk->sk_family == AF_INET6) {
+		msg->msg_name = msg_name_in6;
+	}
+	else if (sk->sk_family == AF_INET) {
+		msg->msg_name = msg_name_in4;
+	}
+	msg->msg_control = recvmsg_args;
+	msg->msg_controllen = sizeof(struct homa_recvmsg_args);
+
+	printk("accept variables (msg and recv_args) set");
+	error = -EINVAL;
+	// Only accept() when a sock is LISTENING for connections
+	if (sk->sk_state != TCP_LISTEN) {
+		pr_err("homa_accept: sock is not listening\n");
+		goto out;
+	}
+	// Copied from inet_recvmsg() for similar semantics
+	if (likely(!(0 & MSG_ERRQUEUE)))
+		sock_rps_record_flow(sk);
+	// Use homa_recvmsg_kernel() internally in kernel to accept the REQUEST msg
+	if (homa_recvmsg_kernel(sk, msg, 0, 0, addr_len) < 0) {
+		pr_err("homa_accept: failed to receive msg in kernel\n");
+		goto out;
+	}
+	if (sk->sk_family == AF_INET) {
+		// retrieve addr from msghdr
+		struct sockaddr_in *in4 = msg->msg_name;
+		printk("accept retrieved addr from msghdr");
+		// copy sock and ip-options of the sock
+		homa_copy_sock(newsk, sk);
+		homa_copy_ip_options(newsk, sk);
+		// use __ip4_datagram_connect() to prevent dead lock
+		if (__ip4_datagram_connect(newsk, (struct sockaddr *) in4, *addr_len) < 0) {
+			pr_err("homa_accept: failed to connect\n");
+			goto out;
+		}
+	}
+	else if (sk->sk_family == AF_INET6) {
+		// retrieve addr from msghdr
+		struct sockaddr_in6 *in6 = msg->msg_name;
+		// copy sock and ip-options of the sock
+		homa_copy_sock(newsk, sk);
+		homa_copy_ip_options(newsk, sk);
+		// use __ip6_datagram_connect() to prevent dead lock
+		if (__ip6_datagram_connect(newsk, (struct sockaddr *) in6, *addr_len) < 0) {
+			pr_err("homa_accept: failed to connect\n");
+			goto out;
+		}
+	}
+	error = 0;
+
+out:
+	kfree(msg_name_in4);
+	kfree(msg_name_in6);
+	kfree(msg);
+	kfree(recvmsg_args);
+	kfree(addr_len);
+	arg->err = error;
+	return newsk;
 }
 
 /**

@@ -206,3 +206,30 @@ int homa_abort(int sockfd, uint64_t id, int error)
 
 	return ioctl(sockfd, HOMAIOCABORT, &args);
 }
+
+/**
+* TCP-style Homa send, to make Homa compatible with TCP-style coding
+* uint64_t *id and int completion_cookie is deleted for now
+* const struct sockaddr *dest_addr and size_t addrlen are also deleted,
+* but they will be handled by sendmsg() in kernel
+*/
+int tcp_style_homa_send(int sockfd, const void *message_buf, size_t length)
+{
+	struct homa_sendmsg_args args;
+	struct msghdr hdr;
+	struct iovec vec;
+	int result;
+
+	args.id = 0;
+	args.completion_cookie = 0;
+
+	vec.iov_base = (void *)message_buf;
+	vec.iov_len = length;
+
+	hdr.msg_iov = &vec;
+	hdr.msg_iovlen = 1;
+	hdr.msg_control = &args;
+	hdr.msg_controllen = 0;
+	result = sendmsg(sockfd, &hdr, 0);
+	return result;
+}
