@@ -878,6 +878,191 @@ int homa_setsockopt(struct sock *sk, int level, int optname,
 }
 
 /**
+ * homa_do_peeloff() - Helper routine to branch off a socket which has one-to-one abstraction.
+ *					   The new socket will not inherit any RPC-related information about the original socket.
+ * @sk:       The original sock, must be one-to-many (unconnected)
+ * @uaddr:    The remote host the new socket wants to establish connection with
+ * @addr_len: The length of the address, used for addr validation
+ * @sockp:    The pointer that points to the pointer of the new socket.
+ * @return:   0 if succeeds, errno otherwise
+ */
+static int homa_do_peeloff(struct sock *sk, struct sockaddr *uaddr, int addr_len, struct socket **sockp) {
+	struct homa_sock *hsk = homa_sk(sk);
+	struct socket *sock;
+	struct homa *homa = global_homa;
+	struct homa_socktab *socktab = homa->port_map;
+	int err = 0;
+
+	/* Check for shutdown */
+	if (hsk->shutdown) {
+		return -ESHUTDOWN;
+	}
+	/* Do not peel off from one netns to another one. */
+	if (!net_eq(current->nsproxy->net_ns, sock_net(sk))) {
+		pr_err("line 901 \n");
+		return -EINVAL;
+	}
+	/* We cannot peel off a socket that has a different AF */
+	if (sk->sk_family == AF_INET) {
+		if (((struct sockaddr_in *)uaddr)->sin_family != AF_INET) {
+			pr_err("line 907 \n");
+			return -EINVAL;
+		}
+		if (addr_len < sizeof(struct sockaddr_in)) {
+			pr_err("line 911 \n");
+			return -EINVAL;
+		}
+	}
+	if (sk->sk_family == AF_INET6) {
+		if (((struct sockaddr_in6 *)uaddr)->sin6_family != AF_INET6)
+			return -EINVAL;
+		if (addr_len < sizeof(struct sockaddr_in6))
+			return -EINVAL;
+	}
+	/* Creates the new socket. */
+	err = sock_create(sk->sk_family, SOCK_DGRAM, IPPROTO_HOMA, &sock);
+	if (err < 0)
+		return err;
+	/* Now we imitate what homa_sock_init does. */
+	struct homa_sock *hsk2 = homa_sk(sock->sk);
+	int i;
+	spin_lock_bh(&socktab->write_lock);
+	atomic_set(&hsk2->protect_count, 0);
+	spin_lock_init(&hsk2->lock);
+	hsk2->last_locker = "none";
+	atomic_set(&hsk2->protect_count, 0);
+	hsk2->homa = homa;
+	hsk2->ip_header_length = (hsk2->inet.sk.sk_family == AF_INET)
+			? HOMA_IPV4_HEADER_LENGTH : HOMA_IPV6_HEADER_LENGTH;
+	hsk2->shutdown = false;
+	/* Cautions! Now we have more than one homa socket on one port. */
+	hsk2->port = hsk->port;
+	hsk2->inet.inet_num = hsk2->port;
+	hsk2->inet.inet_sport = htons(hsk2->port);
+	hsk2->socktab_links.sock = hsk2;
+	/* Cautions! Peeled-off sockets are always connected. */
+	hsk2->connect = true;
+	/* Setting information for the remote host. */
+	if (sk->sk_family == AF_INET) {
+		hsk2->remote_host.in4.sin_family = AF_INET;
+		hsk2->remote_host.in4.sin_addr.s_addr = ((struct sockaddr_in *)uaddr)->sin_addr.s_addr;
+		hsk2->remote_host.in4.sin_port = ((struct sockaddr_in *)uaddr)->sin_port;
+	}
+	if (sk->sk_family == AF_INET6) {
+		hsk2->remote_host.in6.sin6_family = AF_INET6;
+		hsk2->remote_host.in6.sin6_addr = ((struct sockaddr_in6 *)uaddr)->sin6_addr;
+		hsk2->remote_host.in6.sin6_port = ((struct sockaddr_in6 *)uaddr)->sin6_port;
+	}
+	/* Adding the links to the sockets' hash table. */
+	hlist_add_head_rcu(&hsk2->socktab_links.hash_links,
+			   &socktab->buckets[homa_port_hash(hsk2->port)]);
+	/* Other relevant fields filled by homa_sock_init */
+	INIT_LIST_HEAD(&hsk2->active_rpcs);
+	INIT_LIST_HEAD(&hsk2->dead_rpcs);
+	hsk2->dead_skbs = 0;
+	INIT_LIST_HEAD(&hsk2->waiting_for_bufs);
+	INIT_LIST_HEAD(&hsk2->ready_requests);
+	INIT_LIST_HEAD(&hsk2->ready_responses);
+	INIT_LIST_HEAD(&hsk2->request_interests);
+	INIT_LIST_HEAD(&hsk2->response_interests);
+	for (i = 0; i < HOMA_CLIENT_RPC_BUCKETS; i++) {
+		struct homa_rpc_bucket *bucket = &hsk2->client_rpc_buckets[i];
+
+		spin_lock_init(&bucket->lock);
+		INIT_HLIST_HEAD(&bucket->rpcs);
+		bucket->id = i;
+	}
+	for (i = 0; i < HOMA_SERVER_RPC_BUCKETS; i++) {
+		struct homa_rpc_bucket *bucket = &hsk2->server_rpc_buckets[i];
+
+		spin_lock_init(&bucket->lock);
+		INIT_HLIST_HEAD(&bucket->rpcs);
+		bucket->id = i + 1000000;
+	}
+	hsk2->buffer_pool = kzalloc(sizeof(*hsk2->buffer_pool), GFP_KERNEL);
+	if (!hsk2->buffer_pool)
+		return -ENOMEM;
+	if (homa->hijack_tcp)
+		hsk2->sock.sk_protocol = IPPROTO_TCP;
+	spin_unlock_bh(&socktab->write_lock);
+	*sockp = sock;
+	return err;
+}
+
+/**
+ * homa_getsockopt_peeloff_common() - The intermediate method to manage fd for
+ * homa_getsockopt_peeloff()
+ * @sk:		 The original sock
+ * @uaddr:    The remote host the new socket wants to establish connection with
+ * @addr_len: The length of the address, used for addr validation
+ * @newfile:  The file corresponding to the file descriptor
+ * @return   The file descriptor of the new socket
+ */
+static int homa_getsockopt_peeloff_common(struct sock *sk, struct sockaddr *uaddr,
+                                          uint32_t addr_len, struct file **newfile) {
+	struct socket *newsock;
+	int retval;
+	retval = homa_do_peeloff(sk, uaddr, addr_len, &newsock);
+	if (retval < 0)
+		goto out;
+	/* Map the socket to an unused fd that can be returned to the user.  */
+	/* No flag has to do with this for Homa. */
+	retval = get_unused_fd_flags(0);
+	if (retval < 0) {
+		sock_release(newsock);
+		goto out;
+	}
+	*newfile = sock_alloc_file(newsock, 0, NULL);
+	if (IS_ERR(*newfile)) {
+		put_unused_fd(retval);
+		retval = PTR_ERR(*newfile);
+		*newfile = NULL;
+		return retval;
+	}
+	pr_debug("%s: sk:%p, newsk:%p, sd:%d\n", __func__, sk, newsock->sk,
+		 retval);
+out:
+	return retval;
+}
+
+/**
+ * homa_getsockopt_peeloff() - Helper function in homa_getsockopt()
+ * @sk:		  The original socket
+ * @optval:	  struct sockaddr *uaddr
+ * @optlen:	  int addrlen
+ * @return:	  The fd for the branched-off socket
+ */
+static int homa_getsockopt_peeloff(struct sock *sk, char __user *optval, int __user *optlen) {
+	struct sockaddr_storage storage;
+	struct sockaddr *uaddr = (struct sockaddr *)&storage;
+	uint32_t addrlen;
+	struct file *newfile = NULL;
+	int retval = 0;
+	/* Copy uaddr and addrlen from user space. */
+	if (unlikely(copy_from_user(&addrlen, optlen, sizeof(int))))
+		return -EFAULT;
+	if (unlikely(copy_from_user(uaddr, optval, sizeof(struct sockaddr))))
+		return -EFAULT;
+	retval = homa_getsockopt_peeloff_common(sk, uaddr, addrlen, &newfile);
+	if (retval < 0)
+		goto out;
+	if (put_user(addrlen, optlen)) {
+		fput(newfile);
+		put_unused_fd(retval);
+		return -EFAULT;
+	}
+	if (copy_to_user(optval, uaddr, addrlen)) {
+		fput(newfile);
+		put_unused_fd(retval);
+		return -EFAULT;
+	}
+	fd_install(retval, newfile);
+out:
+	return retval;
+}
+
+
+/**
  * homa_getsockopt() - Implements the getsockopt system call for Homa sockets.
  * @sk:      Socket on which the system call was invoked.
  * @level:   Selects level in the network stack to handle the request;
@@ -894,8 +1079,10 @@ int homa_getsockopt(struct sock *sk, int level, int optname,
 	struct homa_sock *hsk = homa_sk(sk);
 	struct homa_rcvbuf_args val;
 	int len;
+	if (optname == SO_HOMA_PEELOFF)
+		goto peeloff;
 
-	if (copy_from_sockptr(&len, USER_SOCKPTR(optlen), sizeof(int)))
+	if (copy_from_sockptr(&len, USER_SOCKPTR(optlen), sizeof(uint32_t)))
 		return -EFAULT;
 
 	if (level != IPPROTO_HOMA || optname != SO_HOMA_RCVBUF)
@@ -912,6 +1099,11 @@ int homa_getsockopt(struct sock *sk, int level, int optname,
 	if (copy_to_sockptr(USER_SOCKPTR(optval), &val, len))
 		return -EFAULT;
 	return 0;
+
+peeloff:
+	if (level != IPPROTO_HOMA)
+		return -ENOPROTOOPT;
+	return homa_getsockopt_peeloff(sk, optval, optlen);
 }
 
 /**
@@ -1065,7 +1257,7 @@ error:
  * @length: Number of bytes of the message.
  * Return: 0 on success, otherwise a negative errno.
  */
-static int homa_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t length)
+static int homa_sendmsg_connected(struct sock *sk, struct msghdr *msg, size_t length)
 {
 	struct homa_sock *hsk = homa_sk(sk);
 	struct homa_sendmsg_args args;
@@ -1075,7 +1267,7 @@ static int homa_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t length)
 	int result = 0;
 	__u64 finish;
 	// If the socket is not connected, report err
-	if (sk->sk_state != TCP_ESTABLISHED) {
+	if (!hsk->connect) {
 		pr_err("homa_sendmsg: unconnected Homa is not supported with connected socks.\n");
 		result = -ENOTSUPP;
 		goto error;
@@ -1087,16 +1279,16 @@ static int homa_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t length)
 	// ipv4
 	if (sk->sk_family == AF_INET) {
 		addr.in4.sin_family = AF_INET;
-		addr.in4.sin_addr.s_addr = hsk->destination.in4.sin_addr.s_addr;
-		addr.in4.sin_port = hsk->destination.in4.sin_port;
+		addr.in4.sin_addr.s_addr = hsk->remote_host.in4.sin_addr.s_addr;
+		addr.in4.sin_port = hsk->remote_host.in4.sin_port;
 		printk("Destination address: %pI4, port: %hu\n", &addr.in4.sin_addr, ntohs(addr.in4.sin_port));
 		pr_info("ipv4 daddr set.\n");
 	}
 	// ipv6
 	else if (sk->sk_family == AF_INET6) {
 		addr.in6.sin6_family = AF_INET6;
-		addr.in6.sin6_addr = hsk->destination.in6.sin6_addr;
-		addr.in6.sin6_port = hsk->destination.in6.sin6_port;
+		addr.in6.sin6_addr = hsk->remote_host.in6.sin6_addr;
+		addr.in6.sin6_port = hsk->remote_host.in6.sin6_port;
 		printk("Destination address: %pI6, port: %hu\n", &addr.in6.sin6_addr, ntohs(addr.in6.sin6_port));
 	}
 	else {
@@ -1230,8 +1422,9 @@ error:
 }
 
 int homa_sendmsg(struct sock *sk, struct msghdr *msg, size_t length) {
-	if (sk->sk_state == TCP_ESTABLISHED) {
-		return homa_tcp_sendmsg(sk, msg, length);
+	struct homa_sock *hsk = homa_sk(sk);
+	if (hsk->connect) {
+		return homa_sendmsg_connected(sk, msg, length);
 	}
 	return homa_sendmsg_original(sk, msg, length);
 }
@@ -1383,24 +1576,27 @@ done:
 
 static int __homa_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len) {
 	struct homa_sock *hsk = homa_sk(sk);
+	if (hsk->shutdown) {
+		return -ESHUTDOWN;
+	}
 	if (sk->sk_family == AF_INET) {
 		struct sockaddr_in *usin = (struct sockaddr_in *) uaddr;
 		if (addr_len < sizeof(*usin))
 			return -EINVAL;
-		hsk->destination.in4.sin_family = AF_INET;
-		hsk->destination.in4.sin_addr.s_addr = usin->sin_addr.s_addr;
-		hsk->destination.in4.sin_port = usin->sin_port;
-		sk->sk_state = TCP_ESTABLISHED;
+		hsk->remote_host.in4.sin_family = AF_INET;
+		hsk->remote_host.in4.sin_addr.s_addr = usin->sin_addr.s_addr;
+		hsk->remote_host.in4.sin_port = usin->sin_port;
+		hsk->connect = true;
 		return 0;
 	}
 	if (sk->sk_family == AF_INET6) {
 		struct sockaddr_in6 *usin6 = (struct sockaddr_in6 *) uaddr;
 		if (addr_len < sizeof(*usin6))
 			return -EINVAL;
-		hsk->destination.in6.sin6_family = AF_INET6;
-		hsk->destination.in6.sin6_addr = usin6->sin6_addr;
-		hsk->destination.in6.sin6_port = usin6->sin6_port;
-		sk->sk_state = TCP_ESTABLISHED;
+		hsk->remote_host.in6.sin6_family = AF_INET6;
+		hsk->remote_host.in6.sin6_addr = usin6->sin6_addr;
+		hsk->remote_host.in6.sin6_port = usin6->sin6_port;
+		hsk->connect = true;
 		return 0;
 	}
 	return -EAFNOSUPPORT;
@@ -1408,9 +1604,9 @@ static int __homa_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 
 int homa_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len) {
 	int res;
-	lock_sock(sk);
+	homa_sock_lock(homa_sk(sk), "homa_connect");
 	res = __homa_connect(sk, uaddr, addr_len);
-	release_sock(sk);
+	homa_sock_unlock(homa_sk(sk));
 	return res;
 }
 

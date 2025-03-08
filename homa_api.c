@@ -208,13 +208,13 @@ int homa_abort(int sockfd, uint64_t id, int error)
 }
 
 /**
-* TCP-style Homa send, to make Homa compatible with TCP-style coding
+* connect()ed-UDP-style Homa send, to make Homa compatible with UDP-style coding
 * uint64_t *id and int completion_cookie is deleted for now
 * const struct sockaddr *dest_addr and size_t addrlen are also deleted,
 * but they will be handled by sendmsg() in kernel
 * flags are not used in Homa
 */
-int tcp_style_homa_send(int sockfd, const void *message_buf, size_t length, int flags)
+int homa_send_connected(int sockfd, const void *message_buf, size_t length, int flags)
 {
 	struct homa_sendmsg_args args;
 	struct msghdr hdr;
@@ -235,4 +235,9 @@ int tcp_style_homa_send(int sockfd, const void *message_buf, size_t length, int 
 	hdr.msg_controllen = 0;
 	result = sendmsg(sockfd, &hdr, 0);
 	return result;
+}
+
+int homa_peeloff(int sockfd, struct sockaddr *client_addr, uint32_t addrlen)
+{
+  	return getsockopt(sockfd, IPPROTO_HOMA, SO_HOMA_PEELOFF, (void *)client_addr, &addrlen);
 }

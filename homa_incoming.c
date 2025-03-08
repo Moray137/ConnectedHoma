@@ -381,8 +381,26 @@ void homa_dispatch_pkts(struct sk_buff *skb, struct homa *homa)
 	struct sk_buff *next;
 	int num_acks = 0;
 
+	/* For homa_sock_find_connected()*/
+	/* Declare a sockaddr_storage to hold the remote address. */
+	struct sockaddr_storage remote_addr_storage;
+	struct sockaddr *remote_addr = (struct sockaddr *)&remote_addr_storage;
+	/* Extract source IP and port from the packet. */
+	if (skb_is_ipv6(skb)) {
+		/* IPv6 packet. */
+		struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)remote_addr;
+		sa6->sin6_family = AF_INET6;
+		sa6->sin6_addr = ipv6_hdr(skb)->saddr;
+		sa6->sin6_port = h->common.sport; // Already in network byte order
+	} else {
+		/* IPv4 packet. */
+		struct sockaddr_in *sa4 = (struct sockaddr_in *)remote_addr;
+		sa4->sin_family = AF_INET;
+		sa4->sin_addr.s_addr = ip_hdr(skb)->saddr; // Network byte order
+		sa4->sin_port = h->common.sport;           // Network byte order
+	}
 	/* Find the appropriate socket.*/
-	hsk = homa_sock_find(homa->port_map, dport);
+	hsk = homa_sock_find_connected(homa->port_map, remote_addr, dport);
 	if (!hsk) {
 		if (skb_is_ipv6(skb))
 			icmp6_send(skb, ICMPV6_DEST_UNREACH,

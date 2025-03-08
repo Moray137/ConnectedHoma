@@ -160,6 +160,8 @@ _Static_assert(sizeof(struct homa_abort_args) <= 32, "homa_abort_args grew");
 
 /** define SO_HOMA_RCVBUF: setsockopt option for specifying buffer region. */
 #define SO_HOMA_RCVBUF 10
+/** define SO_HOMA_PEELOFF: getsockopt option for returning the fd of a branched-off socket */
+#define SO_HOMA_PEELOFF 11
 
 /** struct homa_rcvbuf_args - setsockopt argument for SO_HOMA_RCVBUF. */
 struct homa_rcvbuf_args {
@@ -193,7 +195,7 @@ int     homa_abort(int sockfd, uint64_t id, int error);
 int     homa_send(int sockfd, const void *message_buf,
 		  size_t length, const struct sockaddr *dest_addr,
 		  uint32_t addrlen,  uint64_t *id, uint64_t completion_cookie);
-int     tcp_style_homa_send(int sockfd, const void *message_buf, size_t length, int flags);
+int     homa_send_connected(int sockfd, const void *message_buf, size_t length, int flags);
 int     homa_sendv(int sockfd, const struct iovec *iov,
 		   int iovcnt, const struct sockaddr *dest_addr,
 		   uint32_t addrlen,  uint64_t *id, uint64_t completion_cookie);
@@ -203,6 +205,7 @@ ssize_t homa_reply(int sockfd, const void *message_buf,
 ssize_t homa_replyv(int sockfd, const struct iovec *iov,
 		    int iovcnt, const struct sockaddr *dest_addr,
 		    uint32_t addrlen,  uint64_t id);
+int homa_peeloff(int sockfd, struct sockaddr *client_addr, uint32_t addrlen);
 #endif /* See strip.py */
 
 #ifdef __cplusplus

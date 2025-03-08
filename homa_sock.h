@@ -266,10 +266,14 @@ struct homa_sock {
 	struct homa_pool *buffer_pool;
 
 	/**
-	 * @destination: used for connect(), stores info from connect().
-	 * It does not interfere the routing process of Homa.
+	 * @remote_host: information about the remote host, only used under the connected semantics.
+	 * For client this is set after calling connect(), and for server this is set for the branched-off socket after calling homa_peeloff()
+	 * It does not interfere the routing process of Homa, just for storing information.
 	 */
-	union sockaddr_in_union destination;
+	union sockaddr_in_union remote_host;
+
+	/** @connect: True means the hsk is one-to-one */
+	bool connect;
 };
 
 /**
@@ -290,6 +294,7 @@ int                homa_sock_bind(struct homa_socktab *socktab,
 				  struct homa_sock *hsk, __u16 port);
 void               homa_sock_destroy(struct homa_sock *hsk);
 struct homa_sock  *homa_sock_find(struct homa_socktab *socktab, __u16 port);
+struct homa_sock *homa_sock_find_connected(struct homa_socktab *socktab, struct sockaddr *remote_host, __u16 port);
 int                homa_sock_init(struct homa_sock *hsk, struct homa *homa);
 void               homa_sock_shutdown(struct homa_sock *hsk);
 void               homa_sock_unlink(struct homa_sock *hsk);

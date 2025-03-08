@@ -154,6 +154,12 @@ int homa_sock_init(struct homa_sock *hsk, struct homa *homa)
 	hsk->inet.inet_sport = htons(hsk->port);
 	homa->next_client_port++;
 	hsk->socktab_links.sock = hsk;
+	// Normal homa_socks are not connected
+	hsk->connect = false;
+	// Initialise destination (remote peer info, using addr-port tuple)
+	hsk->remote_host.in4.sin_family = AF_UNSPEC;
+	hsk->remote_host.in4.sin_addr.s_addr = 0;
+	hsk->remote_host.in4.sin_port = htons(0);
 	hlist_add_head_rcu(&hsk->socktab_links.hash_links,
 			   &socktab->buckets[homa_port_hash(hsk->port)]);
 	INIT_LIST_HEAD(&hsk->active_rpcs);
@@ -348,6 +354,12 @@ done:
  * Note: this function uses RCU list-searching facilities, but it doesn't
  * call rcu_read_lock. The caller should do that, if the caller cares (this
  * way, the caller's use of the socket will also be protected).
+ *
+ * Additional Note: This function is not refactored for peeloff.
+ * In homa_sock_bind() and homa_sock_init() it was still called
+ * as only "whether a sock is on the port"
+ * was of interest. Using homa_sock_find_connected() will increase the
+ * overhead and is not desirable in those cases.
  */
 struct homa_sock *homa_sock_find(struct homa_socktab *socktab,  __u16 port)
 {
@@ -364,6 +376,62 @@ struct homa_sock *homa_sock_find(struct homa_socktab *socktab,  __u16 port)
 		}
 	}
 	return result;
+}
+
+/**
+ * homa_sock_find_connected() - Returns the socket associated with a given port and its remote host info.
+ * This is used when demultiplexing, to cater for branched-off sockets sharing the same port
+ * @socktab:         Hash table in which to perform lookup.
+ * @remote_host:     The remote host of interest, must be initialised by the caller
+ * @port:            The port of interest.
+ * @return:          The socket on the port, whose hsk->remote_host matches @remote_host
+ *
+ * Note: this function uses RCU list-searching facilities, but it doesn't
+ * call rcu_read_lock. The caller should do that, if the caller cares (this
+ * way, the caller's use of the socket will also be protected).
+ *
+ * As Homa only cares about ports and the default saddr for Homa is INADDR_ANY,
+ * there is no need for matching daddr. daddr is handled by IP layer, and
+ * is not relevant to Homa.
+ */
+struct homa_sock *homa_sock_find_connected(struct homa_socktab *socktab, struct sockaddr *remote_host, __u16 port) {
+	struct homa_socktab_links *link;
+	struct homa_sock *result = NULL;
+	struct homa_sock *listen = NULL;
+	struct sockaddr_in *in4;
+	struct sockaddr_in6 *in6;
+	if (remote_host->sa_family == AF_INET) {
+		in4 = (struct sockaddr_in *) remote_host;
+	}
+	else if (remote_host->sa_family == AF_INET6) {
+		in6 = (struct sockaddr_in6 *) remote_host;
+	}
+	hlist_for_each_entry_rcu(link, &socktab->buckets[homa_port_hash(port)],
+				 hash_links) {
+		struct homa_sock *hsk = link->sock;
+		/* matches remote host rather than just port */
+		if (hsk->port == port && hsk->sock.sk_family == remote_host->sa_family) {
+			if (hsk->sock.sk_family == AF_INET) {
+				/* remote_host port and addr */
+				if (hsk->remote_host.in4.sin_port == in4->sin_port && hsk->remote_host.in4.sin_addr.s_addr == in4->sin_addr.s_addr) {
+					result = hsk;
+					break;
+				}
+			}
+			else if (hsk->sock.sk_family == AF_INET6) {
+				/* remote_host port and addr */
+				if (hsk->remote_host.in6.sin6_port == in6->sin6_port && memcmp(&hsk->remote_host.in6.sin6_addr, &in6->sin6_addr, sizeof(struct in6_addr)) == 0) {
+					result = hsk;
+					break;
+				}
+			}
+		}
+		/* If no connected socket was found, check for the listening socket */
+		if (hsk->port == port && !hsk->connect) {
+			listen = hsk;
+		}
+	}
+	return result ? result : listen;
 }
 
 /**

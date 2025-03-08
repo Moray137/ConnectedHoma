@@ -220,13 +220,31 @@ void homa_rpc_acked(struct homa_sock *hsk, const struct in6_addr *saddr,
 
 	UNIT_LOG("; ", "ack %llu", id);
 	if (hsk2->port != server_port) {
+		struct homa_socktab_links *link;
+		struct homa_socktab *hst = hsk->homa->port_map;
 		/* Without RCU, sockets other than hsk can be deleted
 		 * out from under us.
 		 */
 		rcu_read_lock();
-		hsk2 = homa_sock_find(hsk->homa->port_map, server_port);
-		if (!hsk2)
-			goto done;
+		/* As there can be more than one socket living on the same port,
+		 * we have to go through the whole socktab bucket for the RPC.
+		 * The total visited RPCs should be the same. Extra overheads due to
+		 * extra comparison would exist, though.
+		 */
+		hlist_for_each_entry_rcu(link, &hst->buckets[homa_port_hash(server_port)],
+				 hash_links) {
+			hsk2 = link->sock;
+			/* Ignores sockets whose port is not server_port */
+			if (hsk2->port == server_port) {
+				rpc = homa_find_server_rpc(hsk2, saddr, id);
+				if (rpc) {
+					tt_record1("homa_rpc_acked freeing id %d", rpc->id);
+					homa_rpc_free(rpc);
+					homa_rpc_unlock(rpc); /* Locked by homa_find_server_rpc. */
+					goto done;
+				}
+			}
+		}
 	}
 	rpc = homa_find_server_rpc(hsk2, saddr, id);
 	if (rpc) {
