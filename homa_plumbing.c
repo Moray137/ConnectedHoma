@@ -1285,15 +1285,12 @@ static int homa_sendmsg_connected(struct sock *sk, struct msghdr *msg, size_t le
 		addr.in4.sin_family = AF_INET;
 		addr.in4.sin_addr.s_addr = hsk->remote_host.in4.sin_addr.s_addr;
 		addr.in4.sin_port = hsk->remote_host.in4.sin_port;
-		printk("Destination address: %pI4, port: %hu\n", &addr.in4.sin_addr, ntohs(addr.in4.sin_port));
-		pr_info("ipv4 daddr set.\n");
 	}
 	// ipv6
 	else if (sk->sk_family == AF_INET6) {
 		addr.in6.sin6_family = AF_INET6;
 		addr.in6.sin6_addr = hsk->remote_host.in6.sin6_addr;
 		addr.in6.sin6_port = hsk->remote_host.in6.sin6_port;
-		printk("Destination address: %pI6, port: %hu\n", &addr.in6.sin6_addr, ntohs(addr.in6.sin6_port));
 	}
 	else {
 		pr_err("homa_sendmsg: unsupported address family\n");
@@ -1312,7 +1309,6 @@ static int homa_sendmsg_connected(struct sock *sk, struct msghdr *msg, size_t le
 		pr_err("homa_sendmsg error: copy_from_user failed\n");
 		goto error;
 	}
-	printk("args.id is %llu", args.id);
 	/**
 	 * As daddr is fully handled in kernel, msg_name and msg_namelen
 	 * do not need to be checked.
@@ -1411,7 +1407,6 @@ static int homa_sendmsg_connected(struct sock *sk, struct msghdr *msg, size_t le
 		INC_METRIC(reply_ns, finish - start);
 	}
 	tt_record1("homa_sendmsg finished, id %d", args.id);
-	pr_info("sendmsg succeeded");
 	return 0;
 
 error:

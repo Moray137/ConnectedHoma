@@ -1238,16 +1238,11 @@ struct homa_rpc *homa_wait_for_message(struct homa_sock *hsk, int flags,
 	 * before we have an RPC with a complete message.
 	 */
 	while (1) {
-		pr_info("homa_wait_for_message: start registering interests (1224)\n");
 		error = homa_register_interests(&interest, hsk, flags, id);
-		pr_info("homa_wait_for_message: end registering interests, id:%llu (1224)\n", id);
-		pr_info("homa_wait_for_message: started atomic_long_read(1227) \n");
 		rpc = (struct homa_rpc *)atomic_long_read(&interest.ready_rpc);
-		pr_info("homa_wait_for_message: end atomic_long_read(1227) \n");
 		if (rpc)
 			goto found_rpc;
 		if (error < 0) {
-			pr_err("homa_wait_for_message: error returned (1231) %d\n", error);
 			result = ERR_PTR(error);
 			goto found_rpc;
 		}
@@ -1256,24 +1251,17 @@ struct homa_rpc *homa_wait_for_message(struct homa_sock *hsk, int flags,
 		 * going to sleep (or returning, if in nonblocking mode).
 		 */
 		while (1) {
-			pr_info("homa_wait_for_message: entered 2nd while loop\n");
 			int reaper_result;
-			pr_info("homa_wait_for_message: started second alr \n");
 			rpc = (struct homa_rpc *)atomic_long_read(&interest
 								  .ready_rpc);
-			pr_info("homa_wait_for_message: end second alr \n");
 			if (rpc) {
 				tt_record1("received RPC handoff while reaping, id %d",
 					   rpc->id);
-				pr_info("homa_wait_for_message: received RPC handoff while reaping \n");
 				goto found_rpc;
 			}
-			pr_info("homa_wait_for_message: started homa_rpc_reap()\n");
 			reaper_result = homa_rpc_reap(hsk,
 						      hsk->homa->reap_limit);
-			pr_info("homa_wait_for_message: ended homa_rpc_reap()\n");
 			if (reaper_result == 0) {
-				pr_info("homa_wait_for_message: homa_rpc_reap() returned 0, break\n");
 				break;
 			}
 
@@ -1281,7 +1269,6 @@ struct homa_rpc *homa_wait_for_message(struct homa_sock *hsk, int flags,
 			schedule();
 		}
 		if (flags & HOMA_RECVMSG_NONBLOCKING) {
-			pr_info("homa_wait_for_message: received nonblocking message \n");
 			result = ERR_PTR(-EAGAIN);
 			goto found_rpc;
 		}
