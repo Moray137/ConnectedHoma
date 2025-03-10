@@ -353,6 +353,7 @@ int homa_xmit_control(enum homa_packet_type type, void *contents,
 	h->flags = HOMA_TCP_FLAGS;
 	h->urgent = htons(HOMA_TCP_URGENT);
 	h->sender_id = cpu_to_be64(rpc->id);
+	printk("attempted to xmit control to %u, type %d, id %llu", rpc->dport, type, rpc->id);
 	return __homa_xmit_control(contents, length, rpc->peer, rpc->hsk);
 }
 

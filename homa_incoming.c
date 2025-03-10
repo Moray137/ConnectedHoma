@@ -1298,13 +1298,8 @@ struct homa_rpc *homa_wait_for_message(struct homa_sock *hsk, int flags,
 		poll_end = now + (1000 * hsk->homa->poll_usecs);
 		while (1) {
 			__u64 blocked;
-			pr_info("homa_wait_for_message: 3rd alr started \n");
 			rpc = (struct homa_rpc *)atomic_long_read(&interest.ready_rpc);
-			pr_info("homa_wait_for_message: 3rd alr end \n");
 			if (rpc) {
-				printk("received RPC handoff while polling, id %llu, socket %hu, pid %d",
-					   rpc->id, hsk->port,
-					   current->pid);
 				tt_record3("received RPC handoff while polling, id %d, socket %d, pid %d",
 					   rpc->id, hsk->port,
 					   current->pid);
@@ -1323,25 +1318,17 @@ struct homa_rpc *homa_wait_for_message(struct homa_sock *hsk, int flags,
 			INC_METRIC(blocked_ns, blocked);
 			poll_start += blocked;
 		}
-		printk("Poll ended unsuccessfully on socket %d, pid %d",
-			   hsk->port, current->pid);
 		tt_record2("Poll ended unsuccessfully on socket %d, pid %d",
 			   hsk->port, current->pid);
 		INC_METRIC(poll_ns, now - poll_start);
 
 		/* Now it's time to sleep. */
 		per_cpu(homa_offload_core, interest.core).last_app_active = now;
-		printk("homa_wait_for_message(): setting current state to TASK_INTERRUPTIBLE \n");
 		set_current_state(TASK_INTERRUPTIBLE);
-		printk("homa_wait_for_message(): set current state to TASK_INTERRUPTIBLE \n");
 		rpc = (struct homa_rpc *)atomic_long_read(&interest.ready_rpc);
-		pr_info("homa_wait_for_message(): 4th alr ended \n");
 		if (!rpc && !hsk->shutdown) {
-			pr_info("homa_wait_for_message(): no rpc no shutdown(1320) \n");
 			__u64 end;
 			__u64 start = sched_clock();
-			printk("homa_wait_for_message sleeping, pid %d",
-				   current->pid);
 			tt_record1("homa_wait_for_message sleeping, pid %d",
 				   current->pid);
 			schedule();
@@ -1364,7 +1351,6 @@ found_rpc:
 		 * so they have to be checked again after locking the socket.
 		 */
 		UNIT_HOOK("found_rpc");
-		printk("homa_wait_for_message: found rpc \n");
 		if (interest.reg_rpc ||
 		    interest.request_links.next != LIST_POISON1 ||
 		    interest.response_links.next != LIST_POISON1) {
@@ -1382,54 +1368,34 @@ found_rpc:
 		 * this could have happened anytime up until we reset the
 		 * interests above).
 		 */
-		printk("homa_wait_for_message: started 5th alr \n");
 		rpc = (struct homa_rpc *)atomic_long_read(&interest.ready_rpc);
-		printk("homa_wait_for_message: ended 5th alr \n");
 		if (rpc) {
 			tt_record2("homa_wait_for_message found rpc id %d, pid %d",
 				   rpc->id, current->pid);
 			if (!interest.locked) {
-				pr_info("homa_wait_for_message: interest is not locked, calling atomic_or()\n");
 				atomic_or(APP_NEEDS_LOCK, &rpc->flags);
-				pr_info("homa_wait_for_message: atomic_or() called\n");
-				pr_info("homa_wait_for_message: locking rpc (1372)\n");
 				homa_rpc_lock(rpc, "homa_wait_for_message");
-				pr_info("homa_wait_for_message: rpc locked (1372)\n");
-				pr_info("homa_wait_for_message: 1375-1376 starts\n");
 				atomic_andnot(APP_NEEDS_LOCK | RPC_HANDING_OFF,
 					      &rpc->flags);
-				pr_info("homa_wait_for_message: 1375-1376 ends\n");
 			} else {
-				pr_info("homa_wait_for_message: 1380 starts\n");
 				atomic_andnot(RPC_HANDING_OFF, &rpc->flags);
-				pr_info("homa_wait_for_message: 1380 ends\n");
 			}
 			if (!rpc->error) {
-				pr_info("homa_wait_for_message: copy to user (1385) \n");
 				rpc->error = homa_copy_to_user(rpc);
-				pr_info("homa_wait_for_message: copied to user (1385) \n");
 			}
 			if (rpc->state == RPC_DEAD) {
-				pr_info("homa_wait_for_message: dead rpc (1390) \n");
 				homa_rpc_unlock(rpc);
-				pr_info("homa_wait_for_message: rpc unlocked (1390) \n");
 				continue;
 			}
 			if (rpc->error) {
-				printk("homa_wait_for_message: rpc error (1394) %d \n", rpc->error);
 				goto done;
 			}
-			pr_info("homa_wait_for_message: 1397 starts \n");
 			atomic_andnot(RPC_PKTS_READY, &rpc->flags);
-			pr_info("homa_wait_for_message: 1397 ends\n");
 			if (rpc->msgin.bytes_remaining == 0 &&
 			    !skb_queue_len(&rpc->msgin.packets)) {
-				pr_info("homa_wait_for_message: no byte remains (1400)\n");
 				goto done;
 			}
-			pr_info("homa_wait_for_message: 1407 starts\n");
 			homa_rpc_unlock(rpc);
-			pr_info("homa_wait_for_message: 1407 ends\n");
 		}
 
 		/* A complete message isn't available: check for errors. */

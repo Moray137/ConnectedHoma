@@ -196,6 +196,8 @@ int     homa_send(int sockfd, const void *message_buf,
 		  size_t length, const struct sockaddr *dest_addr,
 		  uint32_t addrlen,  uint64_t *id, uint64_t completion_cookie);
 int     homa_send_connected(int sockfd, const void *message_buf, size_t length, int flags);
+ssize_t homa_reply_connected(int sockfd, const void *message_buf, size_t length,
+		   uint64_t id);
 int     homa_sendv(int sockfd, const struct iovec *iov,
 		   int iovcnt, const struct sockaddr *dest_addr,
 		   uint32_t addrlen,  uint64_t *id, uint64_t completion_cookie);

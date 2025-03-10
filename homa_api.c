@@ -208,12 +208,51 @@ int homa_abort(int sockfd, uint64_t id, int error)
 }
 
 /**
-* connect()ed-UDP-style Homa send, to make Homa compatible with UDP-style coding
-* uint64_t *id and int completion_cookie is deleted for now
-* const struct sockaddr *dest_addr and size_t addrlen are also deleted,
-* but they will be handled by sendmsg() in kernel
-* flags are not used in Homa
-*/
+ * homa_reply_connected() - Send a response message from a connected homa socket
+ * for an RPC previously received with a call to recvmsg.
+ * @sockfd:       File descriptor for the socket on which to send the message.
+ * @message_buf:  First byte of buffer containing the response message.
+ * @length:       Number of bytes in the message at @message_buf.
+ * @id:           Unique identifier for the request, as returned by recvmsg
+ *                when the request was received.
+ *
+ * @dest_addr and @id are not needed, as this method only operates on peeledoff()
+ * homa sockets
+ *
+ * Return:      0 means the response has been accepted for delivery. If an
+ *              error occurred, -1 is returned and errno is set appropriately.
+ */
+ssize_t homa_reply_connected(int sockfd, const void *message_buf, size_t length,
+		   uint64_t id)
+{
+	struct homa_sendmsg_args args;
+	struct msghdr hdr;
+	struct iovec vec;
+	int result;
+
+	args.id = id;
+	args.completion_cookie = 0;
+
+	vec.iov_base = (void *)message_buf;
+	vec.iov_len = length;
+
+	hdr.msg_name = NULL;
+	hdr.msg_namelen = 0;
+	hdr.msg_iov = &vec;
+	hdr.msg_iovlen = 1;
+	hdr.msg_control = &args;
+	hdr.msg_controllen = 0;
+	result = sendmsg(sockfd, &hdr, 0);
+	return result;
+}
+
+/**
+ * connect()ed-UDP-style Homa send, to make Homa compatible with UDP-style coding
+ * uint64_t *id and int completion_cookie is deleted for now
+ * const struct sockaddr *dest_addr and size_t addrlen are also deleted,
+ * but they will be handled by sendmsg() in kernel
+ * flags are not used in Homa
+ */
 int homa_send_connected(int sockfd, const void *message_buf, size_t length, int flags)
 {
 	struct homa_sendmsg_args args;
@@ -237,6 +276,17 @@ int homa_send_connected(int sockfd, const void *message_buf, size_t length, int 
 	return result;
 }
 
+/**
+ * SCTP style peeloff(), used for peeling off a socket to handle
+ * communication with a specific remote host.
+ * peeloff() is not the same as listen(). It allows the main socket
+ * to process data while the new socket is being set up.
+ * @sockfd: the main socket to be peeled off
+ * @client_addr: retrieved from syscall recvmsg(), specifying remote host
+ * @addrlen: length of the address, used for validating the addr
+ *
+ * @return: new sockfd if sucess, negative if error was encountered
+ */
 int homa_peeloff(int sockfd, struct sockaddr *client_addr, uint32_t addrlen)
 {
   	return getsockopt(sockfd, IPPROTO_HOMA, SO_HOMA_PEELOFF, (void *)client_addr, &addrlen);
