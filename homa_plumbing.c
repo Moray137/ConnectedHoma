@@ -1043,10 +1043,10 @@ static int homa_getsockopt_peeloff(struct sock *sk, char __user *optval, int __u
 		return -EFAULT;
 	if (unlikely(copy_from_user(uaddr, optval, sizeof(struct sockaddr))))
 		return -EFAULT;
-	/* If already peeled off, return -EINVAL */
+	/* If already peeled off, return -EISCONN */
 	struct homa_sock *hsk = homa_sock_find_connected(global_homa->port_map, uaddr, homa_sk(sk)->port);
 	if (hsk->connect)
-		return -EINVAL;
+		return -EISCONN;
 	retval = homa_getsockopt_peeloff_common(sk, uaddr, addrlen, &newfile);
 	if (retval < 0)
 		goto out;
@@ -1490,7 +1490,6 @@ int homa_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		 * the RPC itself we won't get here.
 		 */
 		result = PTR_ERR(rpc);
-		pr_err("homa_recvmsg: rpc returning error %d\n", result);
 		goto done;
 	}
 	result = rpc->error ? rpc->error : rpc->msgin.length;
@@ -1577,6 +1576,9 @@ static int __homa_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	struct homa_sock *hsk = homa_sk(sk);
 	if (hsk->shutdown) {
 		return -ESHUTDOWN;
+	}
+	if (hsk->connect) {
+		return -EISCONN;
 	}
 	if (sk->sk_family == AF_INET) {
 		struct sockaddr_in *usin = (struct sockaddr_in *) uaddr;
