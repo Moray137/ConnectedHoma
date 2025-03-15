@@ -1045,7 +1045,7 @@ static int homa_getsockopt_peeloff(struct sock *sk, char __user *optval, int __u
 		return -EFAULT;
 	/* If already peeled off, return -EISCONN */
 	struct homa_sock *hsk = homa_sock_find_connected(global_homa->port_map, uaddr, homa_sk(sk)->port);
-	if (hsk->connect)
+	if (hsk && hsk->connect)
 		return -EISCONN;
 	retval = homa_getsockopt_peeloff_common(sk, uaddr, addrlen, &newfile);
 	if (retval < 0)
@@ -1203,16 +1203,12 @@ static int homa_sendmsg_original(struct sock *sk, struct msghdr *msg, size_t len
 			goto error;
 		}
 		canonical_dest = canonical_ipv6_addr(addr);
-		printk("homa_sendmsg_original: finding server rpc. \n");
 		rpc = homa_find_server_rpc(hsk, &canonical_dest, args.id);
-		printk("homa_sendmsg_original: found server rpc. \n");
 		if (!rpc) {
 			/* Return without an error if the RPC doesn't exist;
 			 * this could be totally valid (e.g. client is
 			 * no longer interested in it).
 			 */
-			printk("homa_sendmsg error: RPC id %llu, peer 0x%x, doesn't exist",
-				   args.id, tt_addr(canonical_dest));
 			tt_record2("homa_sendmsg error: RPC id %d, peer 0x%x, doesn't exist",
 				   args.id, tt_addr(canonical_dest));
 			return 0;
