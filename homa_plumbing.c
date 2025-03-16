@@ -980,13 +980,16 @@ static int homa_do_peeloff(struct sock *sk, struct sockaddr *uaddr, int addr_len
 		bucket->id = i + 1000000;
 	}
 	hsk2->buffer_pool = kzalloc(sizeof(*hsk2->buffer_pool), GFP_KERNEL);
-	if (!hsk2->buffer_pool)
+	if (!hsk2->buffer_pool) {
+		sock_release(sock);
+		spin_unlock_bh(&socktab->write_lock);
 		return -ENOMEM;
+	}
 	if (homa->hijack_tcp)
 		hsk2->sock.sk_protocol = IPPROTO_TCP;
 	spin_unlock_bh(&socktab->write_lock);
 	*sockp = sock;
-	return err;
+	return 0;
 }
 
 /**
@@ -1014,6 +1017,7 @@ static int homa_getsockopt_peeloff_common(struct sock *sk, struct sockaddr *uadd
 	}
 	*newfile = sock_alloc_file(newsock, 0, NULL);
 	if (IS_ERR(*newfile)) {
+		sock_release(newsock);
 		put_unused_fd(retval);
 		retval = PTR_ERR(*newfile);
 		*newfile = NULL;
